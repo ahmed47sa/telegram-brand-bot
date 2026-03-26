@@ -66,10 +66,10 @@ url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash
 
         if "error" in data:
             print(f"Gemini Error: {data['error']}")
-            return "عذراً، حدث خطأ مؤقت. حاول مرة أخرى 🙏"
+            return "⚠️ عذراً، حدث خطأ مؤقت. حاول مرة أخرى"
 
         assistant_reply = data["candidates"][0]["content"]["parts"][0]["text"]
-
+        
         conversations[user_id].append({
             "role": "model",
             "parts": [{"text": assistant_reply}]
