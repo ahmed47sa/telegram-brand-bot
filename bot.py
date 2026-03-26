@@ -51,12 +51,12 @@ async def ask_gemini(user_id: int, user_message: str) -> str:
     if len(conversations[user_id]) > 20:
         conversations[user_id] = conversations[user_id][-20:]
 
-    payload = {
-        "system_instruction": {
-            "parts": [{"text": SYSTEM_PROMPT}]
-        },
-        "contents": conversations[user_id]
-    }
+    # تجربة لرسالة واحدة فقط للتأكد
+payload = {
+    "contents": [{
+        "parts": [{"text": f"{SYSTEM_PROMPT}\n\nالعميل بيقول: {user_message}"}]
+    }]
+}
 
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
    
