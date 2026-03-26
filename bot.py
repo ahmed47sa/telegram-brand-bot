@@ -1,8 +1,12 @@
 import os
 import re
 import httpx
+import logging
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
+
+# إعداد الـ Logging لمتابعة الأخطاء في Railway
+logging.basicConfig(level=logging.INFO)
 
 # ===== إعدادات =====
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -38,7 +42,6 @@ SYSTEM_PROMPT = """
 # ===== حفظ المحادثات =====
 conversations = {}
 
-
 async def ask_gemini(user_id: int, user_message: str) -> str:
     if user_id not in conversations:
         conversations[user_id] = []
@@ -51,35 +54,40 @@ async def ask_gemini(user_id: int, user_message: str) -> str:
     if len(conversations[user_id]) > 20:
         conversations[user_id] = conversations[user_id][-20:]
 
-    # تجربة لرسالة واحدة فقط للتأكد
-payload = {
-    "contents": [{
-        "parts": [{"text": f"{SYSTEM_PROMPT}\n\nالعميل بيقول: {user_message}"}]
-    }]
-}
+    # تعديل الـ Payload ليكون متوافق مع نسخة v1
+    payload = {
+        "contents": [{
+            "parts": [{"text": f"{SYSTEM_PROMPT}\n\nالعميل بيقول: {user_message}"}]
+        }]
+    }
 
-url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # استخدام نسخة v1 المستقرة لتجنب خطأ 404
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
 
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(url, json=payload)
-        data = response.json()
+        try:
+            response = await client.post(url, json=payload)
+            data = response.json()
 
-        if "error" in data:
-            print(f"Gemini Error: {data['error']}")
-            return "⚠️ عذراً، حدث خطأ مؤقت. حاول مرة أخرى"
+            if "error" in data:
+                logging.error(f"Gemini Error: {data['error']}")
+                return "⚠️ عذراً، حدث خطأ مؤقت. حاول مرة أخرى"
 
-        assistant_reply = data["candidates"][0]["content"]["parts"][0]["text"]
-        
-        conversations[user_id].append({
-            "role": "model",
-            "parts": [{"text": assistant_reply}]
-        })
+            # استخراج الرد بشكل صحيح
+            assistant_reply = data["candidates"][0]["content"]["parts"][0]["text"]
+            
+            conversations[user_id].append({
+                "role": "model",
+                "parts": [{"text": assistant_reply}]
+            })
 
-        return assistant_reply
+            return assistant_reply
+        except Exception as e:
+            logging.error(f"Request Error: {e}")
+            return "⚠️ حدث خطأ في الاتصال، حاول مجدداً."
 
-
-def extract_order(text: str) -> dict | None:
-    pattern = r'\[\[ORDER:\s*name=([^,]+),\s*phone=([^,]+),\s*city=([^,]+),\s*product=([^\]]+)\]\]'
+def extract_order(text: str) -> dict or None:
+    pattern = r'\[\[ORDER:\s*name=(.+?),\s*phone=(.+?),\s*city=(.+?),\s*product=(.+?)\]\]'
     match = re.search(pattern, text)
     if match:
         return {
@@ -90,29 +98,28 @@ def extract_order(text: str) -> dict | None:
         }
     return None
 
-
 def clean_reply(text: str) -> str:
     return re.sub(r'\[\[ORDER:.*?\]\]', '', text, flags=re.DOTALL).strip()
 
+async def notify_owner(context: ContextTypes.DEFAULT_TYPE, order: dict, customer_id: int):
+    if not OWNER_CHAT_ID:
+        return
+        
+    message = f"🛍️ *طلب جديد!*\n\n👤 *العميل:* {order['name']}\n📱 *الهاتف:* `{order['phone']}`\n📍 *المحافظة:* {order['city']}\n🎁 *المنتج:* {order['product']}\n\n🆔 Telegram ID: `{customer_id}`"
 
-async def notify_owner(app: Application, order: dict, customer_id: int):
-    message = f"""🛍️ *طلب جديد!*
-
-👤 *العميل:* {order['name']}
-📱 *الهاتف:* `{order['phone']}`
-📍 *المحافظة:* {order['city']}
-🎁 *المنتج:* {order['product']}
-
-🆔 Telegram ID: `{customer_id}`"""
-
-    await app.bot.send_message(
-        chat_id=OWNER_CHAT_ID,
-        text=message,
-        parse_mode="Markdown"
-    )
-
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text=message,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logging.error(f"Notification Error: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
     user_id = update.effective_user.id
     user_message = update.message.text
 
@@ -127,16 +134,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(clean_message)
 
-    if order and OWNER_CHAT_ID:
-        await notify_owner(context.application, order, user_id)
-
+    if order:
+        await notify_owner(context, order, user_id)
 
 def main():
+    # التأكد من وجود التوكنات
+    if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
+        print("❌ خطأ: تأكد من إضافة TELEGRAM_BOT_TOKEN و GEMINI_API_KEY في Variables")
+        return
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ البوت شغال مع Gemini!")
+    
+    print("✅ البوت شغال الآن...")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
