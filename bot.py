@@ -1,22 +1,21 @@
 import os
-import json
 import re
 import httpx
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# ===== إعدادات - غير القيم دي بس =====
+# ===== إعدادات =====
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
-OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "")  # الـ chat_id بتاعك
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "")
 
-# ===== شخصية البوت وبيانات البراند =====
+# ===== شخصية البوت =====
 SYSTEM_PROMPT = """
 أنت مساعد متجر ملابس "براندي" المصري. ردودك دايماً بالعربية، ودودة، وقصيرة وواضحة.
 
 🛍️ منتجاتنا وأسعارها:
 - تيشيرتات قطن 100%: 150 - 250 جنيه
-- بناطيل جينز: 350 - 550 جنيه  
+- بناطيل جينز: 350 - 550 جنيه
 - هوديز: 400 - 650 جنيه
 - الألوان المتاحة: أبيض، أسود، كحلي، رمادي، بيج
 
@@ -27,65 +26,59 @@ SYSTEM_PROMPT = """
 
 🎯 مهمتك:
 1. رد على أي سؤال عن المنتجات أو الأسعار أو التوصيل
-2. لو العميل أبدى رغبة في الشراء أو طلب التوصيل أو طلب التواصل:
+2. لو العميل أبدى رغبة في الشراء أو طلب التوصيل:
    - اطلب منه: الاسم الكامل، رقم الهاتف، المحافظة، والمنتج المطلوب
    - بعد ما يبعتهم، قوله: "شكراً! سيتواصل معك فريقنا خلال ساعات قليلة 🎉"
-   - وضيف في آخر ردك هذا التنسيق بالضبط (مش هيظهر للعميل):
+   - وضيف في آخر ردك هذا التنسيق بالضبط:
      [[ORDER: name=الاسم, phone=الرقم, city=المحافظة, product=المنتج]]
 
 ملاحظة: لو العميل بعت بيانات ناقصة، اطلب المعلومة الناقصة بس.
 """
 
-# ===== حفظ محادثات العملاء في الذاكرة =====
+# ===== حفظ المحادثات =====
 conversations = {}
 
 
-async def ask_claude(user_id: int, user_message: str) -> str:
-    """بعت الرسالة لـ Claude وارجع الرد"""
-    
-    # احفظ سجل المحادثة لكل عميل
+async def ask_gemini(user_id: int, user_message: str) -> str:
     if user_id not in conversations:
         conversations[user_id] = []
-    
+
     conversations[user_id].append({
         "role": "user",
-        "content": user_message
+        "parts": [{"text": user_message}]
     })
-    
-    # خلي السجل ما يعديش 20 رسالة عشان ما تزيدش التكلفة
+
     if len(conversations[user_id]) > 20:
         conversations[user_id] = conversations[user_id][-20:]
-    
+
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": SYSTEM_PROMPT}]
+        },
+        "contents": conversations[user_id]
+    }
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": CLAUDE_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",  # الأرخص والأسرع
-                "max_tokens": 500,
-                "system": SYSTEM_PROMPT,
-                "messages": conversations[user_id]
-            }
-        )
-        
+        response = await client.post(url, json=payload)
         data = response.json()
-        assistant_reply = data["content"][0]["text"]
-        
-        # احفظ رد Claude في السجل
+
+        if "error" in data:
+            print(f"Gemini Error: {data['error']}")
+            return "عذراً، حدث خطأ مؤقت. حاول مرة أخرى 🙏"
+
+        assistant_reply = data["candidates"][0]["content"]["parts"][0]["text"]
+
         conversations[user_id].append({
-            "role": "assistant",
-            "content": assistant_reply
+            "role": "model",
+            "parts": [{"text": assistant_reply}]
         })
-        
+
         return assistant_reply
 
 
 def extract_order(text: str) -> dict | None:
-    """استخرج بيانات الطلب من رد Claude لو موجودة"""
     pattern = r'\[\[ORDER:\s*name=([^,]+),\s*phone=([^,]+),\s*city=([^,]+),\s*product=([^\]]+)\]\]'
     match = re.search(pattern, text)
     if match:
@@ -99,12 +92,10 @@ def extract_order(text: str) -> dict | None:
 
 
 def clean_reply(text: str) -> str:
-    """شيل الـ ORDER tag من الرسالة قبل ما تتبعت للعميل"""
     return re.sub(r'\[\[ORDER:.*?\]\]', '', text, flags=re.DOTALL).strip()
 
 
-async def notify_owner(app: Application, order: dict, customer_name: str, customer_id: int):
-    """ابعت إشعار لصاحب المتجر"""
+async def notify_owner(app: Application, order: dict, customer_id: int):
     message = f"""🛍️ *طلب جديد!*
 
 👤 *العميل:* {order['name']}
@@ -112,8 +103,8 @@ async def notify_owner(app: Application, order: dict, customer_name: str, custom
 📍 *المحافظة:* {order['city']}
 🎁 *المنتج:* {order['product']}
 
-🆔 Telegram ID: `{customer_id}`
-"""
+🆔 Telegram ID: `{customer_id}`"""
+
     await app.bot.send_message(
         chat_id=OWNER_CHAT_ID,
         text=message,
@@ -122,35 +113,28 @@ async def notify_owner(app: Application, order: dict, customer_name: str, custom
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """المعالج الرئيسي لكل رسالة"""
     user_id = update.effective_user.id
     user_message = update.message.text
-    
-    # أرسل "جاري الكتابة..."
+
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id,
         action="typing"
     )
-    
-    # اسأل Claude
-    claude_reply = await ask_claude(user_id, user_message)
-    
-    # شوف لو في طلب في الرد
-    order = extract_order(claude_reply)
-    
-    # ابعت الرد للعميل (بدون الـ tag)
-    clean_message = clean_reply(claude_reply)
+
+    gemini_reply = await ask_gemini(user_id, user_message)
+    order = extract_order(gemini_reply)
+    clean_message = clean_reply(gemini_reply)
+
     await update.message.reply_text(clean_message)
-    
-    # لو في طلب، ابعت إشعار لصاحب المتجر
+
     if order and OWNER_CHAT_ID:
-        await notify_owner(context.application, order, update.effective_user.first_name, user_id)
+        await notify_owner(context.application, order, user_id)
 
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ البوت شغال!")
+    print("✅ البوت شغال مع Gemini!")
     app.run_polling(drop_pending_updates=True)
 
 
