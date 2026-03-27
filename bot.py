@@ -2,9 +2,10 @@ import os
 import re
 import logging
 from groq import Groq
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 
+# إعداد الـ Logging لمراقبة الأداء في Railway
 logging.basicConfig(level=logging.INFO)
 
 # ===== الإعدادات =====
@@ -14,29 +15,30 @@ OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "")
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# ===== شخصية ندى (Nada Sales) =====
+# ===== شخصية ندى (Nada Sales) لبراند Eilvost =====
 SYSTEM_PROMPT = """
-أنتِ "Nada Sales" من متجر "براندي" للملابس. 
-أسلوبك: بنت مصرية، ذكية، لبقة جداً، وودودة. 
-أول رد ليكي لازم يكون: "مساء الخير، معاكِ ندى من Brandy Sales.. نورتنا يا فندم! 🔥"
-وبعدين اسأليه محتاج يشوف تيشيرتات، جينز، ولا هوديز؟
+أنتِ "Nada Sales" من براند الملابس المصري "Eilvost".
+أسلوبك: بنت مصرية شاطرة، ذكية، ولبقة جداً.
 
-🛍️ المنتجات: تيشيرتات (150-250ج)، جينز (350-550ج)، هوديز (400-650ج).
-📦 التوصيل: 60ج (مجاني فوق 500ج).
+قواعد الرد:
+1. أول رد ليكي في أي محادثة لازم يبدأ بـ: "مساء الخير، معاكِ ندى من Eilvost Sales.. نورتنا يا فندم! 🔥"
+2. وضحي للعميل إننا عندنا: تيشيرتات (150-250ج)، جينز (350-550ج)، وهوديز (400-650ج).
+3. التوصيل بـ 60ج ومجاني لأي طلب فوق الـ 500ج.
+4. هدفك تاخدي (الاسم، الموبايل، المحافظة، والمنتج) وتنهي الطلب بالكود ده في آخر رسالة:
+   [[ORDER: name=الاسم, phone=الرقم, city=المحافظة, product=المنتج]]
 
-🎯 مهمتك:
-- جمع بيانات الأوردر (الاسم، الموبايل، المحافظة، المنتج).
-- إنهاء الطلب بالكود: [[ORDER: name=الاسم, phone=الرقم, city=المحافظة, product=المنتج]]
+⚠️ خليكي دايماً فاكرة كلام العميل وماتكرريش الترحيب لو المحادثة شغالة.
 """
 
 conversations_history = {}
 
-async def ask_groq(user_id: int, user_message: str) -> str:
+async def ask_ai(user_id: int, user_message: str) -> str:
     if user_id not in conversations_history:
         conversations_history[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     
     conversations_history[user_id].append({"role": "user", "content": user_message})
     
+    # الذاكرة لآخر 10 رسائل
     if len(conversations_history[user_id]) > 12:
         conversations_history[user_id] = [conversations_history[user_id][0]] + conversations_history[user_id][-10:]
 
@@ -50,59 +52,54 @@ async def ask_groq(user_id: int, user_message: str) -> str:
         conversations_history[user_id].append({"role": "assistant", "content": reply})
         return reply
     except Exception as e:
-        return "منورة يا فندم، بس حصل ضغط بسيط.. ممكن تبعتي رسالتك تاني؟"
+        logging.error(f"Groq Error: {e}")
+        return "معلش يا فندم، حصل ضغط بسيط.. ممكن تبعت رسالتك تاني؟"
 
-# دالة الترحيب (لما يضغط Start أو يبعت HELLO)
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# دالة الرد على /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    # مسح الذاكرة القديمة لبدء محادثة جديدة
+    # تصفير الذاكرة لبدء محادثة جديدة تماماً
     conversations_history[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     
-    # الرد الترحيبي الأول
-    welcome_text = "مساء الخير، معاكِ ندى من Brandy Sales.. نورتنا يا فندم! 🔥\n\nحابب تشوف كوليكشن التيشيرتات ولا الهوديز النهاردة؟"
-    
-    # إضافة زرار HELLO عشان يظهر للعميل تحت
-    keyboard = [['HELLO']]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    welcome_text = "مساء الخير، معاكِ ندى من Eilvost Sales.. نورتنا يا فندم! 🔥\n\nحابب تشوف كوليكشن التيشيرتات ولا الهوديز النهاردة؟"
+    await update.message.reply_text(welcome_text)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     
-    user_text = update.message.text
     user_id = update.effective_user.id
-
-    # لو العميل بعت HELLO، نعتبرها كأنها Start ونرحب بيه
-    if user_text.upper() == "HELLO":
-        await start_command(update, context)
-        return
+    user_text = update.message.text
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
-    reply = await ask_groq(user_id, user_text)
+    reply = await ask_ai(user_id, user_text)
     
-    # استخراج الأوردر لو موجود
-    pattern = r'\[\[ORDER:\s*name=(.+?),\s*phone=(.+?),\s*city=(.+?),\s*product=(.+?)\]\]'
-    order_match = re.search(pattern, reply)
+    # تنظيف الرد من كود الأوردر قبل عرضه للعميل
     display_msg = re.sub(r'\[\[ORDER:.*?\]\]', '', reply, flags=re.DOTALL).strip()
-
     await update.message.reply_text(display_msg)
 
-    if order_match and OWNER_CHAT_ID:
-        order = {"name": order_match.group(1), "phone": order_match.group(2), "city": order_match.group(3), "product": order_match.group(4)}
-        msg = f"🛍️ *طلب جديد لندى!*\n👤 {order['name']}\n📱 `{order['phone']}`\n📍 {order['city']}\n🎁 {order['product']}"
-        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown")
+    # استخراج بيانات الأوردر لإرسالها لصاحب البوت
+    pattern = r'\[\[ORDER:\s*name=(.+?),\s*phone=(.+?),\s*city=(.+?),\s*product=(.+?)\]\]'
+    match = re.search(pattern, reply)
+    if match and OWNER_CHAT_ID:
+        order_msg = (f"🛍️ *طلب جديد لـ Eilvost!*\n\n"
+                     f"👤 العميل: {match.group(1)}\n"
+                     f"📱 التليفون: `{match.group(2)}`\n"
+                     f"📍 المحافظة: {match.group(3)}\n"
+                     f"🎁 المنتج: {match.group(4)}")
+        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=order_msg, parse_mode="Markdown")
 
 def main():
+    if not TELEGRAM_BOT_TOKEN or not GROQ_API_KEY:
+        print("❌ تأكد من ضبط الـ Variables في Railway!")
+        return
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # التعامل مع /start
-    app.add_handler(CommandHandler("start", start_command))
-    # التعامل مع الرسايل العادية وكلمة HELLO
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🚀 ندى Sales جاهزة للشغل...")
+    print("🚀 ندى من Eilvost جاهزة للطلبات...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
