@@ -1,8 +1,12 @@
 import os
 import re
 import httpx
+import logging
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
+
+# إعداد التقرير لمتابعة الأخطاء
+logging.basicConfig(level=logging.INFO)
 
 # ===== إعدادات =====
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -38,11 +42,11 @@ SYSTEM_PROMPT = """
 # ===== حفظ المحادثات =====
 conversations = {}
 
+# قائمة الموديلات مرتبة من الأكثر استقراراً للأحدث
 GEMINI_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash",
     "gemini-1.5-flash-8b",
+    "gemini-2.0-flash-exp",
 ]
 
 async def ask_gemini(user_id: int, user_message: str) -> str:
@@ -54,8 +58,8 @@ async def ask_gemini(user_id: int, user_message: str) -> str:
         "parts": [{"text": user_message}]
     })
 
-    if len(conversations[user_id]) > 20:
-        conversations[user_id] = conversations[user_id][-20:]
+    if len(conversations[user_id]) > 10:  # تقليل الذاكرة لضمان سرعة الرد
+        conversations[user_id] = conversations[user_id][-10:]
 
     payload = {
         "system_instruction": {
@@ -72,28 +76,25 @@ async def ask_gemini(user_id: int, user_message: str) -> str:
                 data = response.json()
 
                 if "error" in data:
-                    print(f"Model {model} error: {data['error'].get('message','')}")
-                    continue
+                    logging.warning(f"Model {model} failed: {data['error'].get('message')}")
+                    continue  # جرب الموديل اللي بعده لو فيه خطأ
 
                 assistant_reply = data["candidates"][0]["content"]["parts"][0]["text"]
-
+                
                 conversations[user_id].append({
                     "role": "model",
                     "parts": [{"text": assistant_reply}]
                 })
-
-                print(f"✅ رد بنجاح باستخدام: {model}")
                 return assistant_reply
 
             except Exception as e:
-                print(f"Model {model} exception: {e}")
+                logging.error(f"Error with {model}: {e}")
                 continue
 
-    return "عذراً، حدث خطأ مؤقت. حاول مرة أخرى 🙏"
+        return "⚠️ عذراً، جميع المحركات مشغولة حالياً. حاول مجدداً بعد دقيقة."
 
-
-def extract_order(text: str):
-    pattern = r'\[\[ORDER:\s*name=([^,]+),\s*phone=([^,]+),\s*city=([^,]+),\s*product=([^\]]+)\]\]'
+def extract_order(text: str) -> dict or None:
+    pattern = r'\[\[ORDER:\s*name=(.+?),\s*phone=(.+?),\s*city=(.+?),\s*product=(.+?)\]\]'
     match = re.search(pattern, text)
     if match:
         return {
@@ -104,53 +105,39 @@ def extract_order(text: str):
         }
     return None
 
-
 def clean_reply(text: str) -> str:
     return re.sub(r'\[\[ORDER:.*?\]\]', '', text, flags=re.DOTALL).strip()
 
-
-async def notify_owner(app: Application, order: dict, customer_id: int):
-    message = f"""🛍️ *طلب جديد!*
-
-👤 *العميل:* {order['name']}
-📱 *الهاتف:* `{order['phone']}`
-📍 *المحافظة:* {order['city']}
-🎁 *المنتج:* {order['product']}
-
-🆔 Telegram ID: `{customer_id}`"""
-
-    await app.bot.send_message(
-        chat_id=OWNER_CHAT_ID,
-        text=message,
-        parse_mode="Markdown"
-    )
-
+async def notify_owner(context: ContextTypes.DEFAULT_TYPE, order: dict, customer_id: int):
+    if not OWNER_CHAT_ID: return
+    message = (f"🛍️ *طلب جديد!*\n\n👤 *العميل:* {order['name']}\n"
+               f"📱 *الهاتف:* `{order['phone']}`\n📍 *المحافظة:* {order['city']}\n"
+               f"🎁 *المنتج:* {order['product']}\n\n🆔 ID: `{customer_id}`")
+    try:
+        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=message, parse_mode="Markdown")
+    except: pass
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text: return
     user_id = update.effective_user.id
-    user_message = update.message.text
-
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id,
-        action="typing"
-    )
-
-    gemini_reply = await ask_gemini(user_id, user_message)
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    
+    gemini_reply = await ask_gemini(user_id, update.message.text)
     order = extract_order(gemini_reply)
     clean_message = clean_reply(gemini_reply)
 
     await update.message.reply_text(clean_message)
-
-    if order and OWNER_CHAT_ID:
-        await notify_owner(context.application, order, user_id)
-
+    if order:
+        await notify_owner(context, order, user_id)
 
 def main():
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ تأكد من إضافة TELEGRAM_BOT_TOKEN")
+        return
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ البوت شغال مع Gemini!")
+    print("✅ البوت شغال الآن...")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
