@@ -19,7 +19,7 @@ OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "")
 # ===== إعداد Gemini بالمكتبة الرسمية =====
 genai.configure(api_key=GEMINI_API_KEY)
 # نستخدم الموديل 1.5 فلاش مباشرة
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
 
 # ===== شخصية البوت =====
 SYSTEM_PROMPT = """
