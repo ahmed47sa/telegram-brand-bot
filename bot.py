@@ -18,8 +18,8 @@ OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "")
 
 # ===== إعداد Gemini بالمكتبة الرسمية =====
 genai.configure(api_key=GEMINI_API_KEY)
-# نستخدم الموديل 1.5 فلاش مباشرة
-model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
+# نستخدم 'gemini-pro' لضمان أعلى استقرار وتجنب خطأ 404
+model = genai.GenerativeModel('gemini-pro')
 
 # ===== شخصية البوت =====
 SYSTEM_PROMPT = """
@@ -51,7 +51,7 @@ SYSTEM_PROMPT = """
 chat_sessions = {}
 
 async def ask_gemini(user_id: int, user_message: str) -> str:
-    # لو المستخدم جديد، بنبدأ له محادثة جديدة مع البرومبت الأساسي
+    # بدء محادثة جديدة للمستخدم إذا لم تكن موجودة
     if user_id not in chat_sessions:
         chat_sessions[user_id] = model.start_chat(history=[])
         prompt = f"{SYSTEM_PROMPT}\n\nالعميل يقول: {user_message}"
@@ -59,15 +59,15 @@ async def ask_gemini(user_id: int, user_message: str) -> str:
         prompt = user_message
 
     try:
-        # إرسال الرسالة للموديل بشكل غير متزامن
+        # إرسال الرسالة بشكل غير متزامن
         response = await chat_sessions[user_id].send_message_async(prompt)
         return response.text
     except Exception as e:
         logging.error(f"Gemini Error: {e}")
-        return "⚠️ عذراً، حدث خطأ مؤقت في الاتصال بالذكاء الاصطناعي. حاول مرة أخرى."
+        return "⚠️ عذراً، حدث خطأ مؤقت في الاتصال. حاول مرة أخرى."
 
 def extract_order(text: str) -> dict or None:
-    # نمط استخراج البيانات (Regex) المعدل
+    # استخراج بيانات الطلب باستخدام Regex
     pattern = r'\[\[ORDER:\s*name=(.+?),\s*phone=(.+?),\s*city=(.+?),\s*product=(.+?)\]\]'
     match = re.search(pattern, text)
     if match:
@@ -80,7 +80,7 @@ def extract_order(text: str) -> dict or None:
     return None
 
 def clean_reply(text: str) -> str:
-    # مسح كود الطلب من الرسالة اللي بتظهر للعميل
+    # مسح كود الطلب من رد البوت للعميل
     return re.sub(r'\[\[ORDER:.*?\]\]', '', text, flags=re.DOTALL).strip()
 
 async def notify_owner(context: ContextTypes.DEFAULT_TYPE, order: dict, customer_id: int):
@@ -106,34 +106,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text
 
-    # إظهار "Typing..." في تليجرام
+    # إظهار حالة "يكتب الآن"
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-    # الحصول على رد Gemini
+    # الحصول على الرد وتدقيق الطلبات
     reply = await ask_gemini(user_id, user_text)
-    
-    # معالجة الرد (تنظيفه واستخراج الطلب)
     order = extract_order(reply)
     display_msg = clean_reply(reply)
 
     await update.message.reply_text(display_msg)
 
-    # إرسال إشعار لصاحب البوت لو فيه طلب
     if order:
         await notify_owner(context, order, user_id)
 
 def main():
     if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
-        print("❌ خطأ: لم يتم العثور على المفاتيح في Variables!")
+        print("❌ خطأ: المفاتيح ناقصة في Variables!")
         return
 
-    # بناء البوت
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # معالجة الرسائل النصية فقط
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🚀 البوت شغال الآن باستخدام المكتبة الرسمية...")
+    print("✅ البوت شغال ومستقر الآن...")
+    # استخدام drop_pending_updates لحل مشكلة الـ Conflict
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
